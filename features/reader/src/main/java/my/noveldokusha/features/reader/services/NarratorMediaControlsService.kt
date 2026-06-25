@@ -37,14 +37,9 @@ internal class NarratorMediaControlsService : Service() {
     override fun onCreate() {
         super.onCreate()
 
-        val notification = narratorNotification.createNotificationMediaControls(this)
-        if (notification != null) {
-            startForeground(narratorNotification.notificationId, notification)
-        } else {
-            // Создаем минимальное уведомление, чтобы удовлетворить требования foreground сервиса
-            val defaultNotification = narratorNotification.createDefaultNotification(this)
-            startForeground(narratorNotification.notificationId, defaultNotification)
-        }
+        val notification = narratorNotification.createNotificationMediaControls(this) ?: return
+
+        startForeground(narratorNotification.notificationId, notification)
     }
 
     override fun onDestroy() {
