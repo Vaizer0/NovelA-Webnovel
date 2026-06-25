@@ -4,15 +4,17 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.AbsListView
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.OnBackPressedCallback
+import androidx.compose.ui.graphics.toArgb
 import androidx.activity.viewModels
 import androidx.compose.material3.BasicAlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Text
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.viewinterop.AndroidView
@@ -33,11 +35,11 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import my.noveldokusha.coreui.BaseActivity
-import my.noveldokusha.coreui.composableActions.SetSystemBarTransparent
-import my.noveldokusha.coreui.theme.Theme
-import my.noveldokusha.coreui.theme.readerTheme
-import my.noveldokusha.coreui.theme.colorAttrRes
+import my.noveldoksuha.coreui.BaseActivity
+import my.noveldoksuha.coreui.composableActions.SetSystemBarTransparent
+import my.noveldoksuha.coreui.mappers.toPreferenceTheme
+import my.noveldoksuha.coreui.theme.Theme
+import my.noveldoksuha.coreui.theme.colorAttrRes
 import my.noveldokusha.core.utils.Extra_Boolean
 import my.noveldokusha.core.utils.Extra_String
 import my.noveldokusha.core.utils.dpToPx
@@ -87,14 +89,6 @@ class ReaderActivity : BaseActivity() {
 
     private var listIsScrolling = false
     private val fadeInTextLiveData = MutableLiveData(false)
-    // Предотвращает загрузку следующей главы до первого реального скролла пользователя.
-    // Сбрасывается в false при каждом открытии Activity, устанавливается в true только при
-    // TOUCH_SCROLL или FLING — т.е. при реальном жесте, не при programmatic setSelectionFromTop.
-    private var userHasScrolled = false
-
-    // Double-tap detection for showing/hiding reader info
-    private var lastTapTime = 0L
-    private val doubleTapThresholdMs = 350L
 
     private val viewModel by viewModels<ReaderViewModel>()
 
@@ -107,44 +101,28 @@ class ReaderActivity : BaseActivity() {
                 viewModel.bookUrl,
                 currentTextSelectability = { appPreferences.READER_SELECTABLE_TEXT.value },
                 currentFontSize = { appPreferences.READER_FONT_SIZE.value },
-                currentLineHeight = { appPreferences.READER_LINE_HEIGHT.value },
-                currentParagraphSpacing = { appPreferences.READER_PARAGRAPH_SPACING.value },
+                currentLineHeight = { viewModel.state.settings.style.lineHeightMultiplier.value },
+                currentParagraphSpacing = { viewModel.state.settings.style.paragraphSpacing.value },
                 currentTypeface = { fontsLoader.getTypeFaceNORMAL(appPreferences.READER_FONT_FAMILY.value) },
                 currentTypefaceBold = { fontsLoader.getTypeFaceBOLD(appPreferences.READER_FONT_FAMILY.value) },
                 currentSpeakerActiveItem = { viewModel.readerSpeaker.currentTextPlaying.value },
+                lastReadItemPosition = { viewModel.state.lastSentencePosition.value },
                 onChapterStartVisible = viewModel::markChapterStartAsSeen,
                 onChapterEndVisible = viewModel::markChapterEndAsSeen,
                 onReloadReader = viewModel::reloadReader,
-                onRetryChapter = { chapterIndex ->
-                    // Удаляет все items главы с ошибкой (включая Title/Divider),
-                    // сбрасывает chaptersStats и loadedChapters для этой главы,
-                    // затем перезагружает её заново. Остальные уже загруженные главы не трогает.
-                    viewModel.chaptersLoader.retryChapter(chapterIndex)
-                },
-                onOpenChapterInBrowser = { url ->
-                    navigationRoutes.webView(this@ReaderActivity, url = url)
-                        .let(::startActivity)
-                },
                 onClick = {
-                    val now = System.currentTimeMillis()
-                    if (now - lastTapTime < doubleTapThresholdMs) {
-                        viewModel.state.showReaderInfo.value = !viewModel.state.showReaderInfo.value
-                        lastTapTime = 0L
-                    } else {
-                        lastTapTime = now
-                    }
+                    viewModel.state.showReaderInfo.value = !viewModel.state.showReaderInfo.value
                 },
+                onBookmarkToggle = { viewModel.toggleBookmark(it) }
             )
         }
     }
 
-    private val fontsLoader by lazy { FontsLoader(this) }
+    private val fontsLoader = FontsLoader()
 
-    private val backPressedCallback = object : OnBackPressedCallback(true) {
-        override fun handleOnBackPressed() {
-            viewModel.onCloseManually()
-            finish()
-        }
+    override fun onBackPressed() {
+        viewModel.onCloseManually()
+        super.onBackPressed()
     }
 
     override fun onDestroy() {
@@ -155,7 +133,6 @@ class ReaderActivity : BaseActivity() {
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        onBackPressedDispatcher.addCallback(this, backPressedCallback)
         viewBind.listView.adapter = viewAdapter.listView
 
         fadeInTextLiveData.distinctUntilChanged().observe(this) {
@@ -178,7 +155,7 @@ class ReaderActivity : BaseActivity() {
         readerViewHandlersActions.maintainStartPosition = {
             withContext(Dispatchers.Main.immediate) {
                 it()
-                val titleIndex = (0..viewAdapter.listView.count)
+                val titleIndex = (0 until viewAdapter.listView.count)
                     .indexOfFirst { viewAdapter.listView.getItem(it) is ReaderItem.Title }
 
                 if (titleIndex != -1) {
@@ -202,7 +179,7 @@ class ReaderActivity : BaseActivity() {
                 val oldSize = viewAdapter.listView.count
                 val position = viewBind.listView.lastVisiblePosition
                 val positionView = position - viewBind.listView.firstVisiblePosition
-                val top = viewBind.listView.getChildAt(positionView).run { top - paddingTop }
+                val top = viewBind.listView.getChildAt(positionView)?.let { it.top - viewBind.listView.paddingTop } ?: 0
                 it()
                 val displacement = viewAdapter.listView.count - oldSize
                 viewBind.listView.setSelectionFromTop(position + displacement, top)
@@ -276,7 +253,7 @@ class ReaderActivity : BaseActivity() {
             .observe(this) { viewAdapter.listView.notifyDataSetChanged() }
 
         // Notify manually line height changed for list view
-        snapshotFlow { viewModel.state.settings.style.lineHeight.value }.drop(1)
+        snapshotFlow { viewModel.state.settings.style.lineHeightMultiplier.value }.drop(1)
             .asLiveData()
             .observe(this) { viewAdapter.listView.notifyDataSetChanged() }
 
@@ -300,44 +277,88 @@ class ReaderActivity : BaseActivity() {
 
         setContent {
             Theme(themeProvider) {
-                readerTheme {
-                    SetSystemBarTransparent()
+                SetSystemBarTransparent()
 
-                    // Reader info
-                    ReaderScreen(
+                val textColor = androidx.compose.material3.MaterialTheme.colorScheme.onSurface.toArgb()
+                viewAdapter.listView.currentTextColor = textColor
+                
+                viewAdapter.listView.hapticFeedback = androidx.compose.ui.platform.LocalHapticFeedback.current
+
+                // Reader info
+                ReaderScreen(
                     state = viewModel.state,
+                    appPreferences = appPreferences,
                     onTextFontChanged = { appPreferences.READER_FONT_FAMILY.value = it },
                     onTextSizeChanged = { appPreferences.READER_FONT_SIZE.value = it },
                     onLineHeightChanged = { appPreferences.READER_LINE_HEIGHT.value = it },
                     onParagraphSpacingChanged = { appPreferences.READER_PARAGRAPH_SPACING.value = it },
                     onSelectableTextChange = { appPreferences.READER_SELECTABLE_TEXT.value = it },
                     onKeepScreenOn = { appPreferences.READER_KEEP_SCREEN_ON.value = it },
-                    onDarkModeSelected = { appPreferences.THEME_DARK_MODE.value = it.name },
-                    onAppThemeChanged = { appPreferences.APP_THEME.value = it.name },
+                    onFollowSystem = { appPreferences.THEME_FOLLOW_SYSTEM.value = it },
+                    onThemeSelected = { appPreferences.THEME_ID.value = it.toPreferenceTheme },
                     onFullScreen = { appPreferences.READER_FULL_SCREEN.value = it },
                     onPressBack = {
                         viewModel.onCloseManually()
                         finish()
                     },
                     onOpenChapterInWeb = {
-                        val url = viewModel.chapterUrl
+                        val url = viewModel.state.readerInfo.chapterUrl.value
                         if (url.isNotBlank()) {
                             navigationRoutes.webView(this, url = url).let(::startActivity)
                         }
                     },
-                    readerContent = {
-                        AndroidView(factory = { viewBind.root })
-                    },
-                    )
-
-                    if (viewModel.state.showInvalidChapterDialog.value) {
-                        BasicAlertDialog(onDismissRequest = {
-                            viewModel.state.showInvalidChapterDialog.value = false
-                        }) {
-                            Text(stringResource(id = R.string.invalid_chapter))
+                    onProgressChange = { progress ->
+                        val targetChapterUrl = viewModel.state.readerInfo.chapterUrl.value
+                        if (targetChapterUrl.isBlank()) return@ReaderScreen
+                        
+                        // Use a synchronized block or copy to avoid ConcurrentModificationException
+                        val chapterItems = try {
+                            ArrayList(viewModel.items).filter { it is ReaderItem.Position && it.chapterUrl == targetChapterUrl }
+                        } catch (e: Exception) {
+                            emptyList()
                         }
+                        
+                        if (chapterItems.isNotEmpty()) {
+                            val safeProgress = if (progress.isNaN() || progress.isInfinite()) 0f else progress.coerceIn(0f, 100f)
+                            val indexInChapter = ((safeProgress / 100f) * (chapterItems.size - 1)).toInt()
+                                .coerceIn(0, chapterItems.size - 1)
+                            val item = chapterItems[indexInChapter] as ReaderItem.Position
+                            scrollToReadingPositionImmediately(
+                                chapterIndex = item.chapterIndex,
+                                chapterItemPosition = item.chapterItemPosition
+                            )
+                        }
+                    },
+                    readerContent = {
+                        AndroidView(factory = { 
+                            val view = viewBind.root
+                            (view.parent as? ViewGroup)?.removeView(view)
+                            view
+                        })
+                    },
+                )
+
+                if (viewModel.state.showInvalidChapterDialog.value) {
+                    BasicAlertDialog(onDismissRequest = {
+                        viewModel.state.showInvalidChapterDialog.value = false
+                    }) {
+                        Text(stringResource(id = R.string.invalid_chapter))
                     }
                 }
+            }
+        }
+
+        viewBind.listView.setOnItemClickListener { _, _, _, _ ->
+            viewModel.state.showReaderInfo.value = !viewModel.state.showReaderInfo.value
+        }
+
+        viewBind.listView.setOnItemLongClickListener { _, _, _, _ ->
+            if (appPreferences.READER_SELECTABLE_TEXT.value) {
+                false
+            } else {
+                viewModel.state.showReaderInfo.value = true
+                viewModel.state.settings.selectedSetting.value = my.noveldokusha.features.reader.ui.ReaderScreenState.Settings.Type.Audio
+                true
             }
         }
 
@@ -355,24 +376,11 @@ class ReaderActivity : BaseActivity() {
                         )
                     )
                     updateInfoView()
-                    // Only trigger chapter loading when the user is actually scrolling,
-                    // not during programmatic layout changes (e.g. after notifyDataSetChanged).
-                    if (listIsScrolling) {
-                        updateReadingState()
-                    }
+                    updateReadingState()
                 }
 
                 override fun onScrollStateChanged(view: AbsListView?, scrollState: Int) {
                     listIsScrolling = scrollState != AbsListView.OnScrollListener.SCROLL_STATE_IDLE
-                    if (scrollState == AbsListView.OnScrollListener.SCROLL_STATE_FLING ||
-                        scrollState == AbsListView.OnScrollListener.SCROLL_STATE_TOUCH_SCROLL
-                    ) {
-                        userHasScrolled = true
-                    }
-                    // When the user lifts their finger, check if we need to load more chapters
-                    if (!listIsScrolling) {
-                        updateReadingState()
-                    }
                 }
             })
 
@@ -393,7 +401,26 @@ class ReaderActivity : BaseActivity() {
             fadeInTextLiveData.postValue(true)
         }
 
-
+        // Auto Scroll Logic
+        lifecycleScope.launch {
+            var accumulator = 0f
+            while (true) {
+                val speed = viewModel.state.settings.autoScrollSpeed.value
+                if (speed > 0 && !listIsScrolling) {
+                    val delta = speed * 0.12f // speed multiplier for smooth pixel scroll per 16ms
+                    accumulator += delta
+                    val pixelsToScroll = accumulator.toInt()
+                    if (pixelsToScroll > 0) {
+                        viewBind.listView.scrollListBy(pixelsToScroll)
+                        accumulator -= pixelsToScroll
+                    }
+                    delay(16)
+                } else {
+                    accumulator = 0f
+                    delay(100)
+                }
+            }
+        }
 
         when {
             // Use case: user opens app from media control intent
@@ -430,6 +457,7 @@ class ReaderActivity : BaseActivity() {
             window.attributes.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
+        window.statusBarColor = R.attr.colorSurface.colorAttrRes(this)
     }
 
     private fun setupFullScreenMode() {
@@ -444,7 +472,9 @@ class ReaderActivity : BaseActivity() {
             window.attributes.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
+        window.statusBarColor = R.attr.colorSurface.colorAttrRes(this)
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+
     }
 
     private fun setupSystemBarAppearance() {
@@ -464,18 +494,14 @@ class ReaderActivity : BaseActivity() {
     }
 
     private fun scrollToReadingPositionOptional(chapterIndex: Int, chapterItemPosition: Int) {
-        // Always update the view to show current TTS item highlighting
-        viewAdapter.listView.notifyDataSetChanged()
-
-        // If user is scrolling, don't auto-scroll
+        // If user already scrolling ignore
         if (listIsScrolling) {
+            viewAdapter.listView.notifyDataSetChanged()
             return
         }
-
-        // Check if the TTS item is already visible on screen
+        // Search for the item being read otherwise do nothing
         val firstIndex = viewBind.listView.firstVisiblePosition
         val lastIndex = viewBind.listView.lastVisiblePosition
-
         for (index in firstIndex..lastIndex) {
             val item = viewAdapter.listView.getItem(index)
             if (
@@ -485,47 +511,17 @@ class ReaderActivity : BaseActivity() {
             ) {
                 val viewIndex = index - viewBind.listView.firstVisiblePosition
                 val currentOffsetPx =
-                    viewBind.listView.getChildAt(viewIndex).run { top - paddingTop }
+                    viewBind.listView.getChildAt(viewIndex)?.let { it.top - viewBind.listView.paddingTop } ?: 0
                 val newOffsetPx = 200.dpToPx(this@ReaderActivity)
-
-                // Scroll only if item is below the desired visible position (fast scroll)
+                viewAdapter.listView.notifyDataSetChanged()
+                // Scroll if item below new scroll position
                 if (currentOffsetPx > newOffsetPx) {
-                    viewBind.listView.smoothScrollToPositionFromTop(index, newOffsetPx, 400)
+                    viewBind.listView.smoothScrollToPositionFromTop(index, newOffsetPx, 1000)
                 }
                 return
             }
         }
-
-        // Item not visible - use hybrid approach based on distance
-        val itemIndex = indexOfReaderItem(
-            list = viewModel.items,
-            chapterIndex = chapterIndex,
-            chapterItemPosition = chapterItemPosition
-        )
-        if (itemIndex == -1) return
-
-        val itemPosition = viewAdapter.listView.fromIndexToPosition(itemIndex)
-        val newOffsetPx = 200.dpToPx(this@ReaderActivity)
-
-        // Calculate distance from visible area
-        val distanceBelow = itemPosition - lastIndex
-        val distanceAbove = firstIndex - itemPosition
-        val threshold = 5 // Items within this distance get smooth scroll
-
-        when {
-            distanceBelow in 1..threshold -> {
-                // Close below visible area - smooth scroll
-                viewBind.listView.smoothScrollToPositionFromTop(itemPosition, newOffsetPx, 400)
-            }
-            distanceAbove in 1..threshold -> {
-                // Close above visible area - smooth scroll
-                viewBind.listView.smoothScrollToPositionFromTop(itemPosition, newOffsetPx, 400)
-            }
-            else -> {
-                // Far from visible area - instant scroll for better responsiveness
-                viewBind.listView.setSelectionFromTop(itemPosition, newOffsetPx)
-            }
-        }
+        viewAdapter.listView.notifyDataSetChanged()
     }
 
     private fun scrollToReadingPositionForced(chapterIndex: Int, chapterItemPosition: Int) {
@@ -537,7 +533,7 @@ class ReaderActivity : BaseActivity() {
         )
         if (itemIndex == -1) return
         val itemPosition = viewAdapter.listView.fromIndexToPosition(itemIndex)
-        val newOffsetPx = 200.dpToPx(this)
+        val newOffsetPx = 200.dpToPx(this@ReaderActivity)
         viewAdapter.listView.notifyDataSetChanged()
         viewBind.listView.smoothScrollToPositionFromTop(itemPosition, newOffsetPx, 500)
         viewAdapter.listView.notifyDataSetChanged()
@@ -552,46 +548,10 @@ class ReaderActivity : BaseActivity() {
         )
         if (itemIndex == -1) return
         val itemPosition = viewAdapter.listView.fromIndexToPosition(itemIndex)
-        val newOffsetPx = 200.dpToPx(this)
+        val newOffsetPx = 200.dpToPx(this@ReaderActivity)
         viewAdapter.listView.notifyDataSetChanged()
         viewBind.listView.setSelectionFromTop(itemPosition, newOffsetPx)
         viewAdapter.listView.notifyDataSetChanged()
-    }
-
-    /**
-     * FIX: Smooth scroll to TTS position after screen unlock.
-     *
-     * Two bugs fixed here vs the old onResume approach:
-     * 1. Delay/ignored scroll — old code called setSelectionFromTop before the ListView
-     *    finished re-layout after onResume. Now called via post{} so it runs after layout.
-     * 2. Jarring jump — replaced setSelectionFromTop with smoothScrollToPositionFromTop
-     *    for nearby items (<=8 positions away), giving a smooth 350ms animation.
-     *    Items already on screen are skipped entirely (no movement at all).
-     *    Items far away still use instant scroll to avoid a long animation.
-     */
-    private fun scrollToReadingPositionSmooth(chapterIndex: Int, chapterItemPosition: Int) {
-        val itemIndex = indexOfReaderItem(
-            list = viewModel.items,
-            chapterIndex = chapterIndex,
-            chapterItemPosition = chapterItemPosition
-        )
-        if (itemIndex == -1) return
-        val itemPosition = viewAdapter.listView.fromIndexToPosition(itemIndex)
-        val newOffsetPx = 200.dpToPx(this)
-        viewAdapter.listView.notifyDataSetChanged()
-
-        // If item is already visible on screen — no scroll needed, avoids any jarring movement
-        val first = viewBind.listView.firstVisiblePosition
-        val last = viewBind.listView.lastVisiblePosition
-        if (itemPosition in first..last) return
-
-        // Smooth scroll for nearby items, instant jump for distant ones
-        val distance = kotlin.math.abs(itemPosition - first)
-        if (distance <= 8) {
-            viewBind.listView.smoothScrollToPositionFromTop(itemPosition, newOffsetPx, 350)
-        } else {
-            viewBind.listView.setSelectionFromTop(itemPosition, newOffsetPx)
-        }
     }
 
     private fun updateReadingState() {
@@ -607,17 +567,11 @@ class ReaderActivity : BaseActivity() {
 
         when (viewModel.chaptersLoader.readerState) {
             ReaderState.IDLE -> {
-                // Загружаем следующую главу только если пользователь уже реально скроллил.
-                // Это предотвращает преждевременную загрузку при programmatic setSelectionFromTop
-                // в начале сессии, когда список ещё короткий и isBottom сразу true.
-                if (isBottom && userHasScrolled) {
+                if (isBottom) {
                     viewModel.chaptersLoader.tryLoadNext()
                 }
                 if (isTop) {
-                    val firstItem = viewModel.items.getOrNull(0)
-                    if (firstItem != null && firstItem !is ReaderItem.BookStart) {
-                        viewModel.chaptersLoader.tryLoadPrevious()
-                    }
+                    viewModel.chaptersLoader.tryLoadPrevious()
                 }
             }
             ReaderState.LOADING -> run {}
@@ -640,12 +594,13 @@ class ReaderActivity : BaseActivity() {
             viewBind.listView.setSelectionFromTop(position, offset)
         }
         fadeInTextLiveData.postValue(true)
+        viewBind.listView.doOnNextLayout { updateReadingState() }
     }
 
     private fun updateInfoView() {
         val lastVisiblePosition = viewBind.listView.lastVisiblePosition
         val itemIndex = viewAdapter.listView.fromPositionToIndex(lastVisiblePosition)
-        viewModel.updateInfoViewTo(itemIndex, userHasScrolled = userHasScrolled)
+        viewModel.updateInfoViewTo(itemIndex)
     }
 
     override fun onPause() {
@@ -654,61 +609,16 @@ class ReaderActivity : BaseActivity() {
                 viewBind.listView.firstVisiblePosition
             )
         )
-        // Explicitly save to database when app pauses
-        viewModel.saveCurrentReadingPosition()
         super.onPause()
-    }
-
-    override fun onResume() {
-        super.onResume()
-
-        if (viewModel.readerSpeaker.isSpeaking.value) {
-            // Get actual position directly from TTS manager to avoid stale state
-            val itemPos = viewModel.readerSpeaker.getActualPlayingPosition()
-            if (itemPos.chapterIndex >= 0) {
-                viewBind.listView.post {
-                    val firstVisible = viewBind.listView.firstVisiblePosition
-                    val lastVisible = viewBind.listView.lastVisiblePosition
-
-                    // Ищем первый видимый элемент который является Position
-                    // (Padding/Divider/BookStart не имеют позиции чтения)
-                    val firstVisiblePositionItem = (firstVisible..lastVisible)
-                        .asSequence()
-                        .mapNotNull { pos ->
-                            val idx = viewAdapter.listView.fromPositionToIndex(pos)
-                            viewModel.items.getOrNull(idx)
-                        }
-                        .filterIsInstance<ReaderItem.Position>()
-                        .firstOrNull()
-
-                    val readerIsAhead = if (firstVisiblePositionItem != null) {
-                        when {
-                            firstVisiblePositionItem.chapterIndex > itemPos.chapterIndex -> true
-                            firstVisiblePositionItem.chapterIndex == itemPos.chapterIndex ->
-                                firstVisiblePositionItem.chapterItemPosition >= itemPos.chapterItemPosition
-                            else -> false
-                        }
-                    } else {
-                        // Список ещё не перерисован после разблокировки — скроллим к TTS позиции
-                        false
-                    }
-
-                    if (!readerIsAhead) {
-                        scrollToReadingPositionSmooth(
-                            chapterIndex = itemPos.chapterIndex,
-                            chapterItemPosition = itemPos.chapterItemPosition
-                        )
-                    }
-                }
-            }
-        }
     }
 
     private fun updateCurrentReadingPosSavingState(firstVisibleItemIndex: Int) {
         val item = viewModel.items.getOrNull(firstVisibleItemIndex) ?: return
         if (item !is ReaderItem.Position) return
 
-        val offset = viewBind.listView.run { getChildAt(0).top - paddingTop }
+        val offset = viewBind.listView.run { 
+            getChildAt(0)?.let { it.top - viewBind.listView.paddingTop } ?: 0
+        }
         viewModel.readingCurrentChapter = ChapterState(
             chapterUrl = item.chapterUrl,
             chapterItemPosition = item.chapterItemPosition,
