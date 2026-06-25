@@ -1,7 +1,9 @@
 package my.noveldokusha.features.reader.features
 
 import android.content.Context
+import android.util.Log
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -22,6 +24,7 @@ import my.noveldokusha.features.reader.domain.ChapterLoaded
 import my.noveldokusha.features.reader.domain.ReaderItem
 import my.noveldokusha.features.reader.domain.indexOfReaderItem
 import my.noveldokusha.text_to_speech.GeminiTextToSpeechManager
+import my.noveldokusha.text_to_speech.TextToSpeechManager
 import my.noveldokusha.text_to_speech.Utterance
 import my.noveldokusha.text_to_speech.VoiceData
 
