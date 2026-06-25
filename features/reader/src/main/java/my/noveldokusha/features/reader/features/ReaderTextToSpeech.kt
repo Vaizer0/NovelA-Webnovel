@@ -1,9 +1,7 @@
 package my.noveldokusha.features.reader.features
 
 import android.content.Context
-import android.util.Log
 import androidx.compose.runtime.MutableState
-import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -23,11 +21,10 @@ import my.noveldokusha.features.reader.domain.ChapterIndex
 import my.noveldokusha.features.reader.domain.ChapterLoaded
 import my.noveldokusha.features.reader.domain.ReaderItem
 import my.noveldokusha.features.reader.domain.indexOfReaderItem
-import my.noveldokusha.text_to_speech.TextToSpeechManager
+import my.noveldokusha.text_to_speech.GeminiTextToSpeechManager
 import my.noveldokusha.text_to_speech.Utterance
 import my.noveldokusha.text_to_speech.VoiceData
 
-@Stable
 internal data class TextToSpeechSettingData(
     val isPlaying: MutableState<Boolean>,
     val isLoadingChapter: MutableState<Boolean>,
@@ -49,6 +46,11 @@ internal data class TextToSpeechSettingData(
     val setVoiceId: (voiceId: String) -> Unit,
     val setVoiceSpeed: (Float) -> Unit,
     val setVoicePitch: (Float) -> Unit,
+    val chapterWordCount: State<Int>,
+    val remainingWordCount: State<Int>,
+    val estimatedWpm: State<Int>,
+    val estimatedTotalSeconds: State<Int>,
+    val estimatedRemainingSeconds: State<Int>,
 )
 
 internal data class TextSynthesis(
@@ -72,17 +74,14 @@ internal class ReaderTextToSpeech(
     private val loadNextChapter: () -> Unit,
     private val getPreferredVoiceId: () -> String,
     private val setPreferredVoiceId: (voiceId: String) -> Unit,
-    private val getPreferredVoiceEngine: () -> String,
-    private val setPreferredVoiceEngine: (enginePackage: String) -> Unit,
     private val getPreferredVoicePitch: () -> Float,
     private val setPreferredVoicePitch: (voiceId: Float) -> Unit,
     private val getPreferredVoiceSpeed: () -> Float,
     private val setPreferredVoiceSpeed: (voiceId: Float) -> Unit,
-    private val onBufferLow: (() -> Unit)? = null,
 ) {
-    private val halfBuffer = 5
+    private val halfBuffer = 2
     private var updateJob: Job? = null
-    private val manager = TextToSpeechManager(
+    private val manager = GeminiTextToSpeechManager(
         context = context,
         initialItemState = TextSynthesis(
             itemPos = ReaderItem.Title(
@@ -99,10 +98,83 @@ internal class ReaderTextToSpeech(
     val scrolledToTheBottom = MutableSharedFlow<Unit>()
     val currentReaderItem = manager.currentTextSpeakFlow
     val currentTextPlaying = manager.currentActiveItemState as State<TextSynthesis>
-    val reachedChapterEndFlowChapterIndex = MutableSharedFlow<ChapterIndex>()
+    val reachedChapterEndFlowChapterIndex = MutableSharedFlow<ChapterIndex>() // chapter pos
     val startReadingFromFirstVisibleItem = MutableSharedFlow<Unit>()
     val scrollToReaderItem = MutableSharedFlow<ReaderItem>()
     val scrollToChapterTop = MutableSharedFlow<ChapterIndex>()
+
+    private val baseCharactersPerSecond = mutableStateOf(13.0f)
+
+    val chapterWordCount = derivedStateOf {
+        val currentChapterIndex = currentTextPlaying.value.itemPos.chapterIndex
+        if (isChapterIndexValid(currentChapterIndex)) {
+            items.filterIsInstance<ReaderItem.Text>()
+                .filter { it.chapterIndex == currentChapterIndex }
+                .sumOf { it.textToDisplay.wordCount() }
+        } else {
+            0
+        }
+    }
+
+    val remainingWordCount = derivedStateOf {
+        val currentChapterIndex = currentTextPlaying.value.itemPos.chapterIndex
+        val currentItemPos = currentTextPlaying.value.itemPos.chapterItemPosition
+        if (isChapterIndexValid(currentChapterIndex)) {
+            items.filterIsInstance<ReaderItem.Text>()
+                .filter { it.chapterIndex == currentChapterIndex && it.chapterItemPosition >= currentItemPos }
+                .sumOf { it.textToDisplay.wordCount() }
+        } else {
+            0
+        }
+    }
+
+    val chapterCharacterCount = derivedStateOf {
+        val currentChapterIndex = currentTextPlaying.value.itemPos.chapterIndex
+        if (isChapterIndexValid(currentChapterIndex)) {
+            items.filterIsInstance<ReaderItem.Text>()
+                .filter { it.chapterIndex == currentChapterIndex }
+                .sumOf { it.textToDisplay.length }
+        } else {
+            0
+        }
+    }
+
+    val remainingCharacterCount = derivedStateOf {
+        val currentChapterIndex = currentTextPlaying.value.itemPos.chapterIndex
+        val currentItemPos = currentTextPlaying.value.itemPos.chapterItemPosition
+        if (isChapterIndexValid(currentChapterIndex)) {
+            items.filterIsInstance<ReaderItem.Text>()
+                .filter { it.chapterIndex == currentChapterIndex && it.chapterItemPosition >= currentItemPos }
+                .sumOf { it.textToDisplay.length }
+        } else {
+            0
+        }
+    }
+
+    val estimatedWpm = derivedStateOf {
+        val currentSpeed = manager.voiceSpeed.floatValue
+        (baseCharactersPerSecond.value * currentSpeed * 12.0f).toInt().coerceAtLeast(30)
+    }
+
+    val estimatedTotalSeconds = derivedStateOf {
+        val currentSpeed = manager.voiceSpeed.floatValue
+        val cps = baseCharactersPerSecond.value * currentSpeed
+        if (cps > 0f) {
+            (chapterCharacterCount.value / cps).toInt()
+        } else {
+            0
+        }
+    }
+
+    val estimatedRemainingSeconds = derivedStateOf {
+        val currentSpeed = manager.voiceSpeed.floatValue
+        val cps = baseCharactersPerSecond.value * currentSpeed
+        if (cps > 0f) {
+            (remainingCharacterCount.value / cps).toInt()
+        } else {
+            0
+        }
+    }
 
     val state = TextToSpeechSettingData(
         isPlaying = mutableStateOf(false),
@@ -127,6 +199,11 @@ internal class ReaderTextToSpeech(
         scrollToActiveItem = ::scrollToActiveItem,
         setVoicePitch = ::setVoicePitch,
         setVoiceSpeed = ::setVoiceSpeed,
+        chapterWordCount = chapterWordCount,
+        remainingWordCount = remainingWordCount,
+        estimatedWpm = estimatedWpm,
+        estimatedTotalSeconds = estimatedTotalSeconds,
+        estimatedRemainingSeconds = estimatedRemainingSeconds,
     )
 
     val isActive = derivedStateOf { state.isThereActiveItem.value || state.isPlaying.value }
@@ -134,27 +211,53 @@ internal class ReaderTextToSpeech(
 
     init {
         coroutineScope.launch {
-            // Ждём пока все голоса собраны (один раз при старте)
-            manager.serviceLoadedFlow.take(1).collect {
-                manager.trySetVoicePitch(getPreferredVoicePitch())
-                manager.trySetVoiceSpeed(getPreferredVoiceSpeed())
+            manager
+                .serviceLoadedFlow
+                .take(1)
+                .collect {
+                    manager.trySetVoiceById(getPreferredVoiceId())
+                    manager.trySetVoicePitch(getPreferredVoicePitch())
+                    manager.trySetVoiceSpeed(getPreferredVoiceSpeed())
+                }
+        }
 
-                val preferredVoiceId = getPreferredVoiceId()
-                val preferredEngine = getPreferredVoiceEngine()
-                val defaultEngine = manager.service.defaultEngine ?: ""
-
-                // Ищем голос в availableVoices — там все движки с правильным enginePackage
-                val voiceData = manager.availableVoices.find { it.id == preferredVoiceId }
-                val targetEngine = voiceData?.enginePackage ?: preferredEngine
-
-                if (targetEngine.isNotEmpty() && targetEngine != defaultEngine) {
-                    // Голос из другого движка — переключаем service для воспроизведения
-                    manager.reinitWithEngine(
-                        enginePackage = targetEngine,
-                        voiceId = preferredVoiceId
-                    )
-                } else {
-                    manager.trySetVoiceById(preferredVoiceId)
+        coroutineScope.launch {
+            val paragraphStartTimes = mutableMapOf<String, Long>()
+            manager.currentTextSpeakFlow.collect { utterance ->
+                val utteranceId = utterance.utteranceId
+                when (utterance.playState) {
+                    Utterance.PlayState.PLAYING -> {
+                        paragraphStartTimes[utteranceId] = System.currentTimeMillis()
+                    }
+                    Utterance.PlayState.FINISHED -> {
+                        val startTime = paragraphStartTimes.remove(utteranceId)
+                        if (startTime != null) {
+                            val durationMs = System.currentTimeMillis() - startTime
+                            val currentChapterIndex = utterance.itemPos.chapterIndex
+                            val currentItemPos = utterance.itemPos.chapterItemPosition
+                            
+                            val itemIndex = indexOfReaderItem(
+                                list = items,
+                                chapterIndex = currentChapterIndex,
+                                chapterItemPosition = currentItemPos,
+                            )
+                            val item = items.getOrNull(itemIndex) as? ReaderItem.Text
+                            val text = item?.textToDisplay ?: ""
+                            val charCount = text.length
+                            
+                            if (charCount > 10 && durationMs > 200) {
+                                val measuredCps = (charCount * 1000.0f) / durationMs
+                                val currentSpeed = manager.voiceSpeed.floatValue
+                                if (currentSpeed > 0f) {
+                                    val baseCps = measuredCps / currentSpeed
+                                    if (baseCps in 3.0f..40.0f) {
+                                        baseCharactersPerSecond.value = 0.2f * baseCps + 0.8f * baseCharactersPerSecond.value
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else -> Unit
                 }
             }
         }
@@ -162,7 +265,6 @@ internal class ReaderTextToSpeech(
 
     @Synchronized
     fun start() {
-        Log.d("TTS", "start()")
         state.isPlaying.value = true
         updateJob?.cancel()
         updateJob = coroutineScope.launch {
@@ -170,7 +272,6 @@ internal class ReaderTextToSpeech(
                 .currentTextSpeakFlow
                 .filter { it.playState == Utterance.PlayState.FINISHED }
                 .collect {
-                    Log.d("TTS", "collect FINISHED queueSize=${manager.queueList.size}")
                     withContext(Dispatchers.Main) {
                         when (manager.queueList.size) {
                             halfBuffer -> {
@@ -183,7 +284,6 @@ internal class ReaderTextToSpeech(
                                     chapterItemPosition = lastUtterance.itemPos.chapterItemPosition,
                                     quantity = halfBuffer
                                 )
-                                onBufferLow?.invoke()
                             }
                             0 -> {
                                 launch {
@@ -199,7 +299,6 @@ internal class ReaderTextToSpeech(
 
     @Synchronized
     fun stop() {
-        Log.d("TTS", "stop()")
         state.isPlaying.value = false
         updateJob?.cancel()
         manager.stop()
@@ -207,7 +306,7 @@ internal class ReaderTextToSpeech(
 
     fun onClose() {
         stop()
-        manager.service.shutdown()
+        manager.shutdown()
     }
 
     suspend fun readChapterStartingFromStart(
@@ -279,44 +378,6 @@ internal class ReaderTextToSpeech(
     }
 
     @Synchronized
-    fun scrollToCurrentSpeakingItem() {
-        coroutineScope.launch {
-            val currentItemPos = currentTextPlaying.value.itemPos
-            val itemIndex = indexOfReaderItem(
-                list = items,
-                chapterIndex = currentItemPos.chapterIndex,
-                chapterItemPosition = currentItemPos.chapterItemPosition,
-            )
-            val item = items.getOrNull(itemIndex) ?: return@launch
-            scrollToReaderItem.emit(item)
-        }
-    }
-
-    /**
-     * Returns the actual current playing position directly from the TTS manager.
-     * Unlike currentTextPlaying.value.itemPos which may be stale when app is backgrounded,
-     * this always returns the up-to-date position from the underlying utterance state.
-     */
-    fun getActualPlayingPosition(): ReaderItem.Position {
-        // Try to find currently playing item from queue
-        val playingItem = manager.queueList.values
-            .firstOrNull { it.playState == Utterance.PlayState.PLAYING }
-        if (playingItem != null) {
-            return playingItem.itemPos
-        }
-        
-        // Fallback to LOADING item
-        val loadingItem = manager.queueList.values
-            .firstOrNull { it.playState == Utterance.PlayState.LOADING }
-        if (loadingItem != null) {
-            return loadingItem.itemPos
-        }
-        
-        // Fallback to currentActiveItemState
-        return manager.currentActiveItemState.value.itemPos
-    }
-
-    @Synchronized
     private fun playFirstVisibleItem() {
         stop()
         start()
@@ -350,7 +411,9 @@ internal class ReaderTextToSpeech(
 
     @Synchronized
     private fun playNextItem() {
-        if (!state.isThereActiveItem.value) return
+        if (!state.isThereActiveItem.value) {
+            return
+        }
 
         coroutineScope.launch {
             val currentItemPos = state.currentActiveItemState.value.itemPos
@@ -378,7 +441,9 @@ internal class ReaderTextToSpeech(
 
     @Synchronized
     private fun playPreviousItem() {
-        if (!state.isThereActiveItem.value) return
+        if (!state.isThereActiveItem.value) {
+            return
+        }
 
         coroutineScope.launch {
             val currentItemPos = state.currentActiveItemState.value.itemPos
@@ -407,7 +472,9 @@ internal class ReaderTextToSpeech(
 
     @Synchronized
     private fun playNextChapter() {
-        if (!state.isThereActiveItem.value) return
+        if (!state.isThereActiveItem.value) {
+            return
+        }
 
         val currentState = state.currentActiveItemState.value
         val nextChapterIndex = currentState.itemPos.chapterIndex + 1
@@ -444,9 +511,12 @@ internal class ReaderTextToSpeech(
 
     @Synchronized
     private fun playPreviousChapter() {
-        if (!state.isThereActiveItem.value) return
+        if (!state.isThereActiveItem.value) {
+            return
+        }
 
         val currentItemState = state.currentActiveItemState.value
+        // Scroll to current chapter top if not already otherwise scroll to previous top
         val targetChapterIndex = when (currentItemState.itemPos is ReaderItem.Title) {
             true -> currentItemState.itemPos.chapterIndex - 1
             false -> currentItemState.itemPos.chapterIndex
@@ -478,74 +548,57 @@ internal class ReaderTextToSpeech(
     }
 
     private fun setVoice(voiceId: String) {
-        val voiceData = manager.availableVoices.find { it.id == voiceId }
-        // Берём движок из найденного голоса, иначе из текущего service
-        val targetEngine = voiceData?.enginePackage ?: (manager.service.defaultEngine ?: "")
-        val currentEngine = manager.getCurrentEnginePackage()
-
-        if (targetEngine.isNotEmpty() && targetEngine != currentEngine) {
-            // Голос из другого движка — пересоздаём service для воспроизведения
-            val wasPlaying = state.isPlaying.value
-            stop()
+        val wasPlaying = state.isPlaying.value
+        val success = manager.trySetVoiceById(id = voiceId)
+        
+        if (success) {
             setPreferredVoiceId(voiceId)
-            setPreferredVoiceEngine(targetEngine)
-            manager.reinitWithEngine(
-                enginePackage = targetEngine,
-                voiceId = voiceId,
-            )
+            // If it was playing, we want to restart playback immediately with the new voice
+            // without the user having to press play again.
             if (wasPlaying) {
-                coroutineScope.launch {
-                    manager.serviceLoadedFlow.take(1).collect()
-                    start()
-                    val currentState = manager.currentActiveItemState.value
-                    if (isChapterIndexValid(currentState.itemPos.chapterIndex)) {
-                        readChapterStartingFromChapterItemPosition(
-                            chapterIndex = currentState.itemPos.chapterIndex,
-                            chapterItemPosition = currentState.itemPos.chapterItemPosition
-                        )
-                    }
-                }
-            }
-        } else {
-            val success = manager.trySetVoiceById(id = voiceId)
-            if (success) {
-                setPreferredVoiceId(voiceId)
-                if (voiceData != null) setPreferredVoiceEngine(voiceData.enginePackage)
-                resumeFromCurrentState()
+                // Force stop to clear current synthesis
+                stop() 
+                // Immediately start to re-synthesize with new voice
+                // We do this by calling setPlaying(true) which triggers the logic
+                // to read from the current position.
+                setPlaying(true)
             }
         }
     }
 
     private fun setVoicePitch(value: Float) {
-        Log.d("TTS", "setVoicePitch($value)")
         val success = manager.trySetVoicePitch(value)
         if (success) {
             setPreferredVoicePitch(value)
-            resumeFromCurrentState()
+            if (state.isPlaying.value) {
+                // Seamlessly update if supported, or restart
+                resumeFromCurrentState()
+            }
         }
     }
 
     private fun setVoiceSpeed(value: Float) {
-        Log.d("TTS", "setVoiceSpeed($value)")
         val success = manager.trySetVoiceSpeed(value)
         if (success) {
             setPreferredVoiceSpeed(value)
-            resumeFromCurrentState()
+            if (state.isPlaying.value) {
+                resumeFromCurrentState()
+            }
         }
     }
 
     private fun resumeFromCurrentState() {
-        Log.d("TTS", "resumeFromCurrentState isPlaying=${state.isPlaying.value}")
-        if (!state.isPlaying.value) return
+        if (!state.isPlaying.value) {
+            return
+        }
         stop()
         start()
-        val currentState = manager.currentActiveItemState.value
-        Log.d("TTS", "resumeFromCurrentState chapterIndex=${currentState.itemPos.chapterIndex}")
-        if (currentState.itemPos.chapterIndex >= 0) {
+        val state = manager.currentActiveItemState.value
+        if (state.itemPos.chapterIndex > 0) {
             coroutineScope.launch {
                 readChapterStartingFromChapterItemPosition(
-                    chapterIndex = currentState.itemPos.chapterIndex,
-                    chapterItemPosition = currentState.itemPos.chapterItemPosition
+                    chapterIndex = state.itemPos.chapterIndex,
+                    chapterItemPosition = state.itemPos.chapterItemPosition
                 )
             }
         }
@@ -600,4 +653,9 @@ internal class ReaderTextToSpeech(
             else -> Unit
         }
     }
+}
+
+private fun String.wordCount(): Int {
+    if (this.isEmpty()) return 0
+    return this.split(Regex("\\s+")).count { it.isNotEmpty() }
 }
