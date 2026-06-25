@@ -1,0 +1,77 @@
+name: Publish Release
+
+on:
+  workflow_dispatch: # Allows you to run this workflow manually from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  buildRelease:
+    name: Build Release APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone repo
+        uses: actions/checkout@v7
+
+      - name: Set up JDK environment
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: 21
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Setup APK signing
+        run: |
+          echo -n ${{ secrets.SIGNING_KEY }} | base64 -d > app/storeFile.jks
+          echo storeFile=storeFile.jks > custom.properties
+          echo storePassword=${{ secrets.KEY_STORE_PASSWORD }} >> custom.properties
+          echo keyAlias=${{ secrets.ALIAS }} >> custom.properties
+          echo keyPassword=${{ secrets.KEY_PASSWORD }} >> custom.properties
+
+      - name: Remove local Java home from gradle.properties
+        run: sed -i '/org\.gradle\.java\.home/d' gradle.properties
+
+      - name: Build app
+        run: |
+          ./gradlew assembleRelease -PlocalPropertiesFilePath=custom.properties
+
+      - name: Set release version
+        run: |
+          echo "APP_VERSION=$(sed -n 's/^[[:space:]]*versionName = "\(.*\)"$/\1/p' app/build.gradle.kts | head -n 1)" >> "$GITHUB_ENV"
+
+      - name: Collect release APK
+        run: |
+          mkdir -p release-artifacts
+          find app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -exec cp {} release-artifacts/ \;
+          ls -lah release-artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: NoveLA v${{ env.APP_VERSION }}
+          tag_name: v${{ env.APP_VERSION }}
+          draft: true
+          body: |
+            # <img src="https://github.com/HnDK0/NoveLA/raw/default/screenshots/NoveLA.png" width="36" valign="middle"> NoveLA — Light Novel Reader & Parser
+
+            <details>
+            <summary><b>🇷🇺 Russian Version</b></summary>
+
+            ### [КАТЕГОРИЯ]
+            - [ОПИСАНИЕ ИЗМЕНЕНИЯ]
+            </details>
+
+            <details open>
+            <summary><b>🇺🇸 English Version</b></summary>
+
+            ### [CATEGORY]
+            - [CHANGE DESCRIPTION]
+            </details>
+
+            ## Screenshots
+            [ССЫЛКИ НА ИЗОБРАЖЕНИЯ]
+          files: |
+            release-artifacts/*.apk
