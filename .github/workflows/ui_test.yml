@@ -31,7 +31,7 @@ jobs:
           gradle-version: 8.1.1
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: run tests
         uses: ReactiveCircus/android-emulator-runner@v2
