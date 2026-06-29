@@ -47,7 +47,7 @@ jobs:
           adb -e pull /sdcard/test_recordings /test_recordings
 
       - name: Archive production artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ui-test-recordings
           path: test_recordings

@@ -31,13 +31,13 @@ jobs:
       run: ./gradlew assembleFullDebug assembleFossDebug --parallel --stacktrace
 
     - name: Upload Full Debug APK
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: app-full-debug
         path: app/build/outputs/apk/full/debug/*.apk
 
     - name: Upload Foss Debug APK
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: app-foss-debug
         path: app/build/outputs/apk/foss/debug/*.apk
